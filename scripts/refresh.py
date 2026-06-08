@@ -55,6 +55,7 @@ _USER_AGENT = (
 # alias `claude-sonnet-4-6`); both forms get the same rate so consumers
 # keyed on either ID resolve correctly.
 DISPLAY_NAME_TO_MODEL_IDS: dict[str, list[str]] = {
+    "Claude Opus 4.8": ["claude-opus-4-8"],
     "Claude Opus 4.7": ["claude-opus-4-7"],
     "Claude Opus 4.6": ["claude-opus-4-6"],
     "Claude Opus 4.5": ["claude-opus-4-5-20251101"],
