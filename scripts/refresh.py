@@ -19,9 +19,13 @@ Exit codes::
     0  Scrape succeeded; pricing.json unchanged.
     1  Scrape succeeded; pricing.json was updated (drift detected).
     2  Scrape failed (network error, parse error, missing models).
+    3  Scrape succeeded but the page lists a Claude model we don't map yet —
+       a human must add it to DISPLAY_NAME_TO_MODEL_IDS (or, if it's a model
+       we deliberately don't track, to IGNORED_DISPLAY_NAMES). Any mapped-model
+       drift is still written before exiting; only the mapping needs a human.
 
 A cron / systemd timer can rely on these so the user gets notified only
-when there's actual drift to look at.
+when there's actual drift — or a genuinely new model — to look at.
 """
 
 from __future__ import annotations
@@ -55,6 +59,7 @@ _USER_AGENT = (
 # alias `claude-sonnet-4-6`); both forms get the same rate so consumers
 # keyed on either ID resolve correctly.
 DISPLAY_NAME_TO_MODEL_IDS: dict[str, list[str]] = {
+    "Claude Fable 5": ["claude-fable-5"],
     "Claude Opus 4.8": ["claude-opus-4-8"],
     "Claude Opus 4.7": ["claude-opus-4-7"],
     "Claude Opus 4.6": ["claude-opus-4-6"],
@@ -62,6 +67,18 @@ DISPLAY_NAME_TO_MODEL_IDS: dict[str, list[str]] = {
     "Claude Sonnet 4.6": ["claude-sonnet-4-6", "claude-sonnet-4-6-20250929"],
     "Claude Sonnet 4.5": ["claude-sonnet-4-5-20250929"],
     "Claude Haiku 4.5": ["claude-haiku-4-5-20251001"],
+}
+
+# Display names that may appear on the pricing page but which we deliberately
+# do NOT track — retired or below-support-horizon models. Listing a name here
+# records "we've seen this and chose to skip it", which is what distinguishes a
+# known-uninteresting row from a genuinely new model. Without this list the
+# drift detector would cry wolf every run over any legacy row still on the page;
+# with it, only net-new models trip the exit-3 signal. Add a name here (rather
+# than to DISPLAY_NAME_TO_MODEL_IDS) when a model shows up that consumers don't
+# need priced.
+IGNORED_DISPLAY_NAMES: set[str] = {
+    "Claude Opus 3",  # retired 2026-01-05; consumers no longer see its traffic
 }
 
 
@@ -121,6 +138,27 @@ def parse_pricing_rows(html: str) -> dict[str, dict[str, float]]:
     if not rows:
         raise ValueError("Pricing table had no recognised rows — page layout may have changed.")
     return rows
+
+
+def find_unmapped_models(scraped_rows: dict[str, dict[str, float]]) -> list[str]:
+    """Return scraped display names that are neither mapped nor ignored.
+
+    Every row the parser yields is a Claude pricing row (the regex anchors on
+    ``Claude ...``), so a name that is absent from both DISPLAY_NAME_TO_MODEL_IDS
+    and IGNORED_DISPLAY_NAMES is a genuinely new model the map hasn't caught up
+    with. ``main`` turns a non-empty result into exit code 3 so the daily job
+    flags it for a human instead of silently dropping it.
+
+    Returns:
+        Sorted list of unmapped display names (empty when the page holds no
+        surprises).
+    """
+    unmapped = [
+        name
+        for name in scraped_rows
+        if name not in DISPLAY_NAME_TO_MODEL_IDS and name not in IGNORED_DISPLAY_NAMES
+    ]
+    return sorted(unmapped)
 
 
 def merge_with_existing(
@@ -207,22 +245,35 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Pricing file is not valid JSON: {exc}", file=sys.stderr)
         return 2
 
+    unmapped = find_unmapped_models(scraped)
     updated, changes = merge_with_existing(existing, scraped)
-    if not changes:
+
+    if changes:
+        print("Drift detected:")
+        for change in changes:
+            print(f"  - {change}")
+        if args.dry_run:
+            print("Dry run; not writing.")
+        else:
+            write_pricing(args.file, updated)
+            print(f"Wrote updates to {args.file}.")
+    else:
         print("pricing.json is up to date.")
-        return 0
 
-    print("Drift detected:")
-    for change in changes:
-        print(f"  - {change}")
+    # A net-new model outranks drift: mapped drift (if any) is already handled
+    # above, but an unmapped model needs a human to add the mapping, so signal
+    # that distinctly rather than reporting a clean 0/1.
+    if unmapped:
+        print(
+            "New model(s) on the pricing page with no mapping — add each to "
+            "DISPLAY_NAME_TO_MODEL_IDS (or IGNORED_DISPLAY_NAMES to skip):",
+            file=sys.stderr,
+        )
+        for name in unmapped:
+            print(f"  - {name}", file=sys.stderr)
+        return 3
 
-    if args.dry_run:
-        print("Dry run; not writing.")
-        return 1
-
-    write_pricing(args.file, updated)
-    print(f"Wrote updates to {args.file}.")
-    return 1
+    return 1 if changes else 0
 
 
 if __name__ == "__main__":

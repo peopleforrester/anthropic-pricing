@@ -2,6 +2,13 @@
   "_comment": "Per-model Anthropic API token pricing (USD per million tokens). Single source of truth across consumer repos (llm-coding-workflow, Engineering_Journal). <synthetic> covers Claude Code's post-compact assistant marker (zero token usage). Source: https://platform.claude.com/docs/en/docs/about-claude/pricing",
   "last_verified": "2026-06-08",
   "models": {
+    "claude-fable-5": {
+      "name": "Fable 5",
+      "input": 10.0,
+      "output": 50.0,
+      "cache_create": 12.50,
+      "cache_read": 1.00
+    },
     "claude-opus-4-8": {
       "name": "Opus 4.8",
       "input": 5.0,

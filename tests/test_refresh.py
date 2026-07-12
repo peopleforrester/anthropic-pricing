@@ -172,9 +172,11 @@ class TestMergeWithExisting:
         assert any("claude-sonnet-4-6.input" in c for c in changes)
         assert any("claude-sonnet-4-6-20250929.input" in c for c in changes)
 
-    def test_unknown_display_name_ignored(self, module: Any) -> None:
-        """A row for some future model we haven't mapped to an API ID
-        should not get added with a guessed key."""
+    def test_unknown_display_name_not_auto_added(self, module: Any) -> None:
+        """merge_with_existing must never guess an API key for an unmapped
+        model — the dateless/dated alias decision needs a human. The *flagging*
+        of that unmapped model happens via find_unmapped_models (below); merge
+        just refrains from adding it."""
         scraped = {
             "Claude Future 5.0": {
                 "input": 99.0, "cache_create": 99.0, "cache_read": 99.0, "output": 99.0,
@@ -183,6 +185,32 @@ class TestMergeWithExisting:
         updated, changes = module.merge_with_existing(self._baseline(), scraped)
         assert changes == []
         assert "claude-future-5-0" not in updated["models"]
+
+
+class TestFindUnmappedModels:
+    """A net-new model on the page must be surfaced, not silently dropped."""
+
+    def test_all_mapped_returns_empty(self, module: Any) -> None:
+        scraped = {"Claude Opus 4.7": {}, "Claude Sonnet 4.6": {}}
+        assert module.find_unmapped_models(scraped) == []
+
+    def test_flags_new_model(self, module: Any) -> None:
+        scraped = {"Claude Opus 4.7": {}, "Claude Nebula 6": {}}
+        assert module.find_unmapped_models(scraped) == ["Claude Nebula 6"]
+
+    def test_ignored_name_not_flagged(self, module: Any) -> None:
+        """Deliberately-untracked legacy models (in IGNORED_DISPLAY_NAMES) are
+        not treated as new — otherwise the daily job would alert forever on
+        deprecated rows still listed on the page."""
+        assert "Claude Opus 3" in module.IGNORED_DISPLAY_NAMES
+        scraped = {"Claude Opus 3": {}, "Claude Opus 4.7": {}}
+        assert module.find_unmapped_models(scraped) == []
+
+    def test_result_is_sorted(self, module: Any) -> None:
+        scraped = {"Claude Zephyr 9": {}, "Claude Aurora 2": {}}
+        assert module.find_unmapped_models(scraped) == [
+            "Claude Aurora 2", "Claude Zephyr 9",
+        ]
 
 
 class TestEndToEnd:
@@ -276,6 +304,70 @@ class TestEndToEnd:
             exit_code = module.main(["--file", str(pricing_file)])
 
         assert exit_code == 0
+
+    def test_returns_3_when_unmapped_model_present(
+        self, tmp_path: Path, module: Any, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A new Claude model on the page that isn't in the map must exit 3 and
+        name the model on stderr — never a silent skip with a green exit 0."""
+        pricing_file = tmp_path / "pricing.json"
+        pricing_file.write_text(json.dumps({
+            "last_verified": "2026-04-01",
+            "models": {
+                "claude-opus-4-7": {
+                    "name": "Opus 4.7",
+                    "input": 5.0, "cache_create": 6.25, "cache_read": 0.50, "output": 25.0,
+                },
+            },
+            "defaults": {"input": 15.0, "cache_create": 18.75, "cache_read": 1.50, "output": 75.0},
+        }))
+        unmapped_html = "\n".join([
+            "| Model | Base Input | 5m Cache | 1h Cache | Cache Hits | Output |",
+            "|---|---|---|---|---|---|",
+            "| Claude Opus 4.7 | $5 / MTok | $6.25 / MTok | $10 / MTok |"
+            " $0.50 / MTok | $25 / MTok |",
+            "| Claude Nebula 6 | $20 / MTok | $25 / MTok | $40 / MTok |"
+            " $2 / MTok | $100 / MTok |",
+        ])
+
+        with patch.object(module, "fetch_pricing_page", return_value=unmapped_html):
+            exit_code = module.main(["--file", str(pricing_file)])
+
+        assert exit_code == 3
+        assert "Claude Nebula 6" in capsys.readouterr().err
+
+    def test_writes_mapped_drift_even_when_unmapped_present(
+        self, tmp_path: Path, module: Any,
+    ) -> None:
+        """Known drift is still applied to pricing.json even though a new
+        unmapped model forces exit 3 — we don't lose good data while flagging."""
+        pricing_file = tmp_path / "pricing.json"
+        pricing_file.write_text(json.dumps({
+            "last_verified": "2026-04-01",
+            "models": {
+                "claude-opus-4-7": {
+                    "name": "Opus 4.7",
+                    "input": 4.0,  # Drift from $5
+                    "cache_create": 6.25, "cache_read": 0.50, "output": 25.0,
+                },
+            },
+            "defaults": {"input": 15.0, "cache_create": 18.75, "cache_read": 1.50, "output": 75.0},
+        }))
+        unmapped_html = "\n".join([
+            "| Model | Base Input | 5m Cache | 1h Cache | Cache Hits | Output |",
+            "|---|---|---|---|---|---|",
+            "| Claude Opus 4.7 | $5 / MTok | $6.25 / MTok | $10 / MTok |"
+            " $0.50 / MTok | $25 / MTok |",
+            "| Claude Nebula 6 | $20 / MTok | $25 / MTok | $40 / MTok |"
+            " $2 / MTok | $100 / MTok |",
+        ])
+
+        with patch.object(module, "fetch_pricing_page", return_value=unmapped_html):
+            exit_code = module.main(["--file", str(pricing_file)])
+
+        assert exit_code == 3
+        # Mapped drift was written despite the exit-3 flag.
+        assert json.loads(pricing_file.read_text())["models"]["claude-opus-4-7"]["input"] == 5.0
 
     def test_returns_2_on_fetch_failure(
         self, tmp_path: Path, module: Any, capsys: pytest.CaptureFixture[str],

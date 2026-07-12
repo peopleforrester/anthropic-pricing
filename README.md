@@ -79,6 +79,11 @@ Exit codes:
 - `1` — drift detected (with `--dry-run`, no write; without, the file was
   rewritten).
 - `2` — scrape failure (network error, parse error, missing file).
+- `3` — the page lists a Claude model with no mapping. Add it to
+  `DISPLAY_NAME_TO_MODEL_IDS` (or, if it's a model consumers don't need priced,
+  to `IGNORED_DISPLAY_NAMES`). Any mapped-model drift is still written first;
+  only the mapping needs a human. This is what keeps a net-new model from
+  slipping past unnoticed.
 
 A daily systemd-user timer fires the dry-run on Netcup (PRD #6 M4); when
 drift appears it opens a PR on the GitHub repo instead of auto-committing.

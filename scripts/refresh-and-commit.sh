@@ -10,7 +10,8 @@ cd "${REPO_DIR}"
 
 log() { printf '%s [pricing-refresh] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-# refresh.py exit codes: 0 up-to-date, 1 drift written, 2 scrape failure.
+# refresh.py exit codes: 0 up-to-date, 1 drift written, 2 scrape failure,
+#                        3 new unmapped model on the page (needs a human).
 set +e
 uv run --python 3.13 python scripts/refresh.py
 rc=$?
@@ -34,6 +35,13 @@ case "${rc}" in
         git push --quiet origin HEAD:main
         log "pushed updated pricing.json."
         exit 0
+        ;;
+    3)
+        log "ERROR: pricing page lists a Claude model with no mapping. A human"
+        log "must add it to DISPLAY_NAME_TO_MODEL_IDS (see stderr above). Not"
+        log "committing — any mapped-model drift written stays uncommitted for"
+        log "the same human to review and commit alongside the new mapping."
+        exit 3
         ;;
     *)
         log "ERROR: refresh failed (scrape error, exit ${rc}). Not committing."
